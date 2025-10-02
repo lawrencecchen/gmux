@@ -1,0 +1,23 @@
+{
+  "name": "gmux",
+  "version": "0.0.7",
+  "description": "Terminal UI to switch between git working directories and launch editors",
+  "bin": {
+    "gmux": "bin/gmux"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "git",
+    "tui",
+    "rust",
+    "workspace"
+  ],
+  "author": "Lawrence Chen",
+  "scripts": {
+    "test": "echo 'gmux is a binary package'"
+  }
+}
