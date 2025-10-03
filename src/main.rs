@@ -2,8 +2,11 @@ mod config;
 mod git;
 
 use std::{
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
+    sync::mpsc::{self, TryRecvError},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -30,6 +33,7 @@ use crate::config::{AppConfig, EntryConfig, load_config, save_config};
 
 const MAX_HOTKEYS: usize = 9;
 const BRANCH_REFRESH: Duration = Duration::from_millis(500);
+const REFRESH_IDLE: Duration = Duration::from_millis(200);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Parser)]
@@ -154,28 +158,46 @@ fn run_tui() -> Result<()> {
     enable_terminal()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     app.refresh_branches();
-    let mut last_tick = Instant::now();
+    let mut last_refresh = Instant::now();
+    let mut last_interaction = Instant::now();
 
     let res = loop {
+        app.tick_refresh_worker();
         app.maybe_clear_status();
         terminal.draw(|f| ui(f, &app))?;
 
-        let timeout = BRANCH_REFRESH
-            .checked_sub(last_tick.elapsed())
+        let refresh_elapsed = last_refresh.elapsed();
+        let interaction_elapsed = last_interaction.elapsed();
+        let mut timeout = BRANCH_REFRESH
+            .checked_sub(refresh_elapsed)
             .unwrap_or_else(|| Duration::from_millis(0));
 
+        if refresh_elapsed >= BRANCH_REFRESH && interaction_elapsed < REFRESH_IDLE {
+            timeout = REFRESH_IDLE - interaction_elapsed;
+        } else if refresh_elapsed < BRANCH_REFRESH {
+            if let Some(idle_wait) = REFRESH_IDLE.checked_sub(interaction_elapsed) {
+                if idle_wait > Duration::from_millis(0) && idle_wait < timeout {
+                    timeout = idle_wait;
+                }
+            }
+        }
+
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
+            let event = event::read()?;
+            last_interaction = Instant::now();
+            if let Event::Key(key) = event {
                 app.handle_key(key);
+                app.tick_refresh_worker();
                 if app.should_quit {
                     break Ok(());
                 }
             }
         }
 
-        if last_tick.elapsed() >= BRANCH_REFRESH {
+        if last_refresh.elapsed() >= BRANCH_REFRESH && last_interaction.elapsed() >= REFRESH_IDLE {
             app.refresh_branches();
-            last_tick = Instant::now();
+            app.tick_refresh_worker();
+            last_refresh = Instant::now();
         }
     };
 
@@ -198,13 +220,16 @@ fn disable_terminal() -> Result<()> {
 #[derive(Clone, Debug)]
 struct Entry {
     config: EntryConfig,
+    normalized_path: PathBuf,
     branch: BranchState,
 }
 
 impl Entry {
     fn from_config(config: EntryConfig) -> Self {
+        let normalized_path = normalize(&config.path);
         Self {
             config,
+            normalized_path,
             branch: BranchState::Unknown,
         }
     }
@@ -277,6 +302,41 @@ enum BranchState {
     Error(String),
 }
 
+#[derive(Clone, Debug)]
+struct BranchUpdate {
+    normalized_path: PathBuf,
+    branch: BranchState,
+}
+
+struct RefreshJob {
+    receiver: mpsc::Receiver<Vec<BranchUpdate>>,
+}
+
+impl RefreshJob {
+    fn new(configs: Vec<EntryConfig>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let updates = configs
+                .into_iter()
+                .map(|config| {
+                    let normalized_path = normalize(&config.path);
+                    let branch = branch_state_for(&config);
+                    BranchUpdate {
+                        normalized_path,
+                        branch,
+                    }
+                })
+                .collect();
+            let _ = tx.send(updates);
+        });
+        Self { receiver: rx }
+    }
+
+    fn try_recv(&self) -> Result<Vec<BranchUpdate>, TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
 impl BranchState {
     fn label(&self) -> Vec<Span<'_>> {
         match self {
@@ -346,6 +406,8 @@ struct App {
     pending_path: Option<PathBuf>,
     editing_index: Option<usize>,
     status: Option<StatusMessage>,
+    refresh_job: Option<RefreshJob>,
+    refresh_requested: bool,
     should_quit: bool,
 }
 
@@ -370,6 +432,8 @@ impl App {
             pending_path: None,
             editing_index: None,
             status: None,
+            refresh_job: None,
+            refresh_requested: false,
             should_quit: false,
         })
     }
@@ -763,10 +827,11 @@ impl App {
         self.sync_entries();
         self.refresh_branches();
         if !self.entries.is_empty() {
+            let target = normalize(&path);
             if let Some(idx) = self
                 .entries
                 .iter()
-                .position(|e| normalize(&e.config.path) == normalize(&path))
+                .position(|e| e.normalized_path == target)
             {
                 self.selected = idx;
             }
@@ -793,10 +858,11 @@ impl App {
         self.sync_entries();
         self.refresh_branches();
         if !self.entries.is_empty() {
+            let target = normalize(&path);
             if let Some(pos) = self
                 .entries
                 .iter()
-                .position(|e| normalize(&e.config.path) == normalize(&path))
+                .position(|e| e.normalized_path == target)
             {
                 self.selected = pos;
             } else if idx < self.entries.len() {
@@ -840,8 +906,66 @@ impl App {
     }
 
     fn refresh_branches(&mut self) {
+        self.refresh_requested = true;
+        self.start_refresh_job();
+    }
+
+    fn start_refresh_job(&mut self) {
+        if self.refresh_job.is_some() || !self.refresh_requested {
+            return;
+        }
+
+        let configs: Vec<EntryConfig> = self
+            .entries
+            .iter()
+            .map(|entry| entry.config.clone())
+            .collect();
+
+        if configs.is_empty() {
+            self.refresh_requested = false;
+            return;
+        }
+
+        self.refresh_job = Some(RefreshJob::new(configs));
+        self.refresh_requested = false;
+    }
+
+    fn tick_refresh_worker(&mut self) {
+        let mut completed: Option<Vec<BranchUpdate>> = None;
+        if let Some(job) = &self.refresh_job {
+            match job.try_recv() {
+                Ok(updates) => {
+                    completed = Some(updates);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    completed = Some(Vec::new());
+                }
+            }
+        }
+
+        if let Some(updates) = completed {
+            if !updates.is_empty() {
+                self.apply_branch_updates(updates);
+            }
+            self.refresh_job = None;
+        }
+
+        if self.refresh_job.is_none() && self.refresh_requested {
+            self.start_refresh_job();
+        }
+    }
+
+    fn apply_branch_updates(&mut self, updates: Vec<BranchUpdate>) {
+        let mut states: HashMap<PathBuf, BranchState> = HashMap::with_capacity(updates.len());
+        for update in updates {
+            states.insert(update.normalized_path, update.branch);
+        }
+
         for entry in &mut self.entries {
-            entry.branch = branch_state_for(&entry.config);
+            if let Some(state) = states.get(&entry.normalized_path) {
+                entry.branch = state.clone();
+            }
         }
     }
 

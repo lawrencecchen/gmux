@@ -6,7 +6,7 @@ from pathlib import Path
 
 __all__ = ["binary_path", "__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 def binary_path() -> Path:
