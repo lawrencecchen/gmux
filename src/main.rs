@@ -211,29 +211,92 @@ impl Entry {
 }
 
 #[derive(Clone, Debug)]
+struct GitBranchInfo {
+    name: String,
+    additions: u32,
+    deletions: u32,
+}
+
+impl GitBranchInfo {
+    fn summary(&self) -> String {
+        let mut changes = Vec::new();
+        if self.additions > 0 {
+            changes.push(format!("+{}", self.additions));
+        }
+        if self.deletions > 0 {
+            changes.push(format!("-{}", self.deletions));
+        }
+
+        if changes.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} ({})", self.name, changes.join(" "))
+        }
+    }
+
+    fn spans(&self) -> Vec<Span<'_>> {
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            self.name.clone(),
+            Style::default().fg(Color::Rgb(120, 170, 255)),
+        ));
+
+        if self.additions > 0 || self.deletions > 0 {
+            spans.push(Span::raw(" "));
+            spans.push(Span::raw("("));
+            let mut need_space = false;
+            if self.additions > 0 {
+                spans.push(Span::styled(
+                    format!("+{}", self.additions),
+                    Style::default().fg(Color::Green),
+                ));
+                need_space = true;
+            }
+            if self.deletions > 0 {
+                if need_space {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    format!("-{}", self.deletions),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            spans.push(Span::raw(")"));
+        }
+
+        spans
+    }
+}
+
+#[derive(Clone, Debug)]
 enum BranchState {
     Unknown,
-    Ready(String),
+    Ready(GitBranchInfo),
     Missing,
     NotGit,
     Error(String),
 }
 
 impl BranchState {
-    fn label(&self) -> (&str, Style) {
+    fn label(&self) -> Vec<Span<'_>> {
         match self {
-            BranchState::Unknown => ("…", Style::default().fg(Color::DarkGray)),
-            BranchState::Ready(branch) => (branch.as_str(), Style::default().fg(Color::LightGreen)),
-            BranchState::Missing => ("missing", Style::default().fg(Color::Red)),
-            BranchState::NotGit => ("not a repo", Style::default().fg(Color::Yellow)),
-            BranchState::Error(err) => (err.as_str(), Style::default().fg(Color::Red)),
+            BranchState::Unknown => vec![Span::styled("…", Style::default().fg(Color::DarkGray))],
+            BranchState::Ready(info) => info.spans(),
+            BranchState::Missing => vec![Span::styled("missing", Style::default().fg(Color::Red))],
+            BranchState::NotGit => vec![Span::styled(
+                "not a repo",
+                Style::default().fg(Color::Yellow),
+            )],
+            BranchState::Error(err) => {
+                vec![Span::styled(err.clone(), Style::default().fg(Color::Red))]
+            }
         }
     }
 
     fn text(&self) -> String {
         match self {
             BranchState::Unknown => "…".to_string(),
-            BranchState::Ready(branch) => branch.clone(),
+            BranchState::Ready(info) => info.summary(),
             BranchState::Missing => "missing".to_string(),
             BranchState::NotGit => "not a repo".to_string(),
             BranchState::Error(err) => err.clone(),
@@ -986,7 +1049,15 @@ fn branch_state_for(entry: &EntryConfig) -> BranchState {
         BranchState::NotGit
     } else {
         match git::current_branch(&entry.path) {
-            Ok(branch) => BranchState::Ready(branch),
+            Ok(branch) => {
+                let diff = git::diff_stat(&entry.path).unwrap_or_default();
+                let info = GitBranchInfo {
+                    name: branch,
+                    additions: diff.additions,
+                    deletions: diff.deletions,
+                };
+                BranchState::Ready(info)
+            }
             Err(err) => BranchState::Error(err.to_string()),
         }
     }
@@ -1220,7 +1291,7 @@ fn ui(frame: &mut Frame, app: &App) {
         ])
         .split(frame.size());
 
-    let base_style = Style::default().bg(Color::Rgb(30, 30, 30));
+    let base_style = Style::default();
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -1262,7 +1333,7 @@ fn ui(frame: &mut Frame, app: &App) {
                 } else {
                     "·".into()
                 };
-                let (branch_label, branch_style) = entry.branch.label();
+                let branch_spans = entry.branch.label();
                 let is_selected = idx == app.selected;
                 let hotkey_style = if is_selected {
                     Style::default().fg(Color::Rgb(120, 170, 255))
@@ -1277,7 +1348,7 @@ fn ui(frame: &mut Frame, app: &App) {
                     Style::default().fg(Color::White),
                 ));
                 spans.push(Span::styled("  ", Style::default().fg(Color::White)));
-                spans.push(Span::styled(branch_label.to_string(), branch_style));
+                spans.extend(branch_spans);
                 if let Some(editor) = &entry.config.editor {
                     spans.push(Span::styled("  ", Style::default().fg(Color::White)));
                     spans.push(Span::styled(

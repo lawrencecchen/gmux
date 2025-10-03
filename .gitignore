@@ -31,6 +31,8 @@ dist/
 pip-wheel-metadata/
 python/.venv/
 python/.env
+python/dist/
+python/gmux.egg-info/
 
 # Environment / secrets
 .env
