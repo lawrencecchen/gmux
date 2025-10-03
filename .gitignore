@@ -1,1 +1,58 @@
-/target
+# Cargo / Rust
+/target/
+**/*.rs.bk
+
+# Node / npm
+node_modules/
+npm/node_modules/
+npm/dist/
+npm/*.log
+npm/.npmrc
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyi
+*.pyd
+*.pyo
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+.python-cache/
+
+# Python packaging
+build/
+dist/
+pip-wheel-metadata/
+python/.venv/
+python/.env
+
+# Environment / secrets
+.env
+.env.*
+*.env
+*.pem
+
+# Coverage
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+
+# Logs / temp files
+*.log
+*.tmp
+*.swp
+*.swo
+*.DS_Store
+Thumbs.db
+
+# IDE / tooling
+.idea/
+.vscode/
+*.iml
