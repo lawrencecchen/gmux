@@ -621,27 +621,32 @@ impl App {
             return Err(anyhow!("{path_display} is not a directory"));
         }
 
-        self.pending_path = Some(path.clone());
-        self.mode = Mode::Input {
-            flow,
-            step: FlowStep::Editor,
-        };
-        let prefill = match flow {
-            FlowKind::Add => self.editor_prefill(None),
+        match flow {
+            FlowKind::Add => {
+                self.save_entry(path.clone(), None)?;
+                let path_str = display_path(&path);
+                self.set_status(StatusKind::Info, format!("Registered {path_str}"));
+                self.mode = Mode::Normal;
+                self.input_buffer.clear();
+                self.input_cursor = 0;
+                self.pending_path = None;
+                self.editing_index = None;
+            }
             FlowKind::Edit => {
+                self.pending_path = Some(path.clone());
+                self.mode = Mode::Input {
+                    flow,
+                    step: FlowStep::Editor,
+                };
                 let entry = self
                     .editing_index
                     .and_then(|idx| self.config.entries.get(idx));
-                self.editor_prefill(entry)
+                let prefill = self.editor_prefill(entry);
+                self.input_buffer = prefill;
+                self.input_cursor = self.input_buffer.chars().count();
+                self.set_status(StatusKind::Info, "Edit editor command (enter to accept current value)".into());
             }
-        };
-        self.input_buffer = prefill;
-        self.input_cursor = self.input_buffer.chars().count();
-        let message = match flow {
-            FlowKind::Add => "Set editor command (enter to accept current value)".into(),
-            FlowKind::Edit => "Edit editor command (enter to accept current value)".into(),
-        };
-        self.set_status(StatusKind::Info, message);
+        }
         Ok(())
     }
 
@@ -657,6 +662,22 @@ impl App {
         } else {
             Some(editor_string.clone())
         };
+
+        if flow == FlowKind::Edit {
+            if let Some(idx) = self.editing_index {
+                if let Some(orig) = self.config.entries.get(idx) {
+                    if orig.path == path && orig.editor == editor {
+                        self.set_status(StatusKind::Info, "No changes made".into());
+                        self.mode = Mode::Normal;
+                        self.input_buffer.clear();
+                        self.input_cursor = 0;
+                        self.pending_path = None;
+                        self.editing_index = None;
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         if let Some(cmd) = editor.clone() {
             self.config.default_editor = Some(cmd);
@@ -1546,7 +1567,7 @@ fn draw_bottom_panel(
         Mode::Input { flow, step } => {
             let (title, hint) = match (flow, step) {
                 (FlowKind::Add, FlowStep::Directory) => {
-                    ("Add Directory", "Enter to confirm • Esc/Ctrl+G to cancel")
+                    ("Add Directory", "Enter to add with default editor • Esc/Ctrl+G to cancel")
                 }
                 (FlowKind::Add, FlowStep::Editor) => (
                     "Editor Command",
